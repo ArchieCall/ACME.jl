@@ -3,24 +3,33 @@
 
 export SimpleSolver, HomotopySolver, CachingSolver
 
-type ParametricNonLinEq
+type ParametricNonLinEq{Scratch}
     func::Function
+    set_p::Function
     res::Vector{Float64}
     Jp::Matrix{Float64}
     J::Matrix{Float64}
-    function ParametricNonLinEq(func::Function, nn::Integer, np::Integer)
+    scratch::Scratch
+    function ParametricNonLinEq(func::Function, set_p::Function,
+                                scratch::Scratch, nn::Integer, np::Integer)
         res = zeros(nn)
         Jp = zeros(nn, np)
         J = zeros(nn, nn)
-        return new(func, res, Jp, J)
+        return new(func, set_p, res, Jp, J, scratch)
     end
 end
+ParametricNonLinEq{Scratch}(func::Function, set_p::Function, scratch::Scratch,
+                            nn::Integer, np::Integer) =
+    ParametricNonLinEq{Scratch}(func, set_p, scratch, nn, np)
+ParametricNonLinEq(func::Function, nn::Integer, np::Integer) =
+    ParametricNonLinEq(func, copy!, zeros(np), nn, np)
 
 nn(nleq::ParametricNonLinEq) = length(nleq.res)
 np(nleq::ParametricNonLinEq) = size(nleq.Jp, 2)
 
-evaluate!(nleq::ParametricNonLinEq, p, z) =
-    nleq.func(nleq.res, nleq.J, nleq.Jp, p, z)
+set_p!(nleq::ParametricNonLinEq, p) = nleq.set_p(nleq.scratch, p)
+evaluate!(nleq::ParametricNonLinEq, z) =
+    nleq.func(nleq.res, nleq.J, nleq.Jp, nleq.scratch, z)
 
 
 type SimpleSolver
@@ -54,7 +63,8 @@ end
 set_resabs2tol!(solver::SimpleSolver, tol) = solver.tol = tol
 
 function set_extrapolation_origin(solver::SimpleSolver, p, z)
-    evaluate!(solver.nleq, p, z)
+    set_p!(solver.nleq, p)
+    evaluate!(solver.nleq, z)
     JLU = lufact!(solver.nleq.J)
     set_extrapolation_origin(solver, p, z, solver.nleq.Jp, JLU)
 end
@@ -75,6 +85,7 @@ hasconverged(solver::SimpleSolver) = solver.ressumabs2 < solver.tol
 needediterations(solver::SimpleSolver) = solver.iters
 
 function solve(solver::SimpleSolver, p::AbstractVector{Float64}, maxiter=500)
+    set_p!(solver.nleq, p)
     #solver.z = solver.last_z - solver.JLU\(solver.last_Jp * (p-solver.last_p))
     copy!(solver.tmp_np, p)
     BLAS.axpy!(-1.0, solver.last_p, solver.tmp_np)
@@ -84,7 +95,7 @@ function solve(solver::SimpleSolver, p::AbstractVector{Float64}, maxiter=500)
     BLAS.axpy!(-1.0, solver.tmp_nn, solver.z)
     local JLU
     for solver.iters=1:maxiter
-        evaluate!(solver.nleq, p, solver.z)
+        evaluate!(solver.nleq, solver.z)
         solver.ressumabs2 = sumabs2(solver.nleq.res)
         if ~isfinite(solver.ressumabs2) || ~all(isfinite(solver.nleq.J))
             return solver.z
