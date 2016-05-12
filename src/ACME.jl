@@ -300,77 +300,85 @@ type DiscreteModel{Solver}
     b::Matrix{Float64}
     c::Matrix{Float64}
     x0::Vector{Float64}
-    pexp::Matrix{Float64}
+    pexps::Vector{Matrix{Float64}}
     dq::Matrix{Float64}
     eq::Matrix{Float64}
-    fq::Matrix{Float64}
-    q0::Vector{Float64}
+    fqs::Matrix{Matrix{Float64}}
+    q0s::Vector{Vector{Float64}}
     dy::Matrix{Float64}
     ey::Matrix{Float64}
     fy::Matrix{Float64}
     y0::Vector{Float64}
 
-    nonlinear_eq :: Expr
+    nonlinear_eqs::Vector{Expr}
 
-    solver::Solver
+    solvers::Vector{Solver}
     x::Vector{Float64}
 
     function DiscreteModel(circ::Circuit, t::Float64)
         model = new()
 
         mats = model_matrices(circ, t)
-        for mat in [:a, :b, :c, :pexp, :dq, :eq, :fq, :dy, :ey, :fy]
+        for mat in [:a, :b, :c, :dq, :eq, :dy, :ey, :fy]
             model.(mat)=full(mats[mat])
         end
-        for vec in [:x0, :q0, :y0]
+        model.fqs=hcat(Matrix{Float64}[full(mats[:fq])])
+        model.pexps=Matrix{Float64}[full(mats[:pexp])]
+        for vec in [:x0, :y0]
             model.(vec)=squeeze(full(mats[vec]), tuple((2:ndims(mats[vec]))...))
         end
+        model.q0s=Vector{Float64}[vec(full(mats[:q0]))]
 
         @assert nn(circ) == nn(model)
 
         model.x = zeros(nx(model))
 
-        model.nonlinear_eq = quote
+        if isempty(circ.elements)
+            nl_elems = []
+        else
+            nl_elems = filter(e -> nn(circ.elements[e]) > 0, 1:length(circ.elements))
+        end
+        model.nonlinear_eqs = [quote
             #copy!(q, q0 + pexp * p + fq * z)
             copy!(q, q0)
             BLAS.gemv!('N',1.,pexp,p,1.,q)
             BLAS.gemv!('N',1.,fq,z,1.,q)
             let J=Jq
-                $(nonlinear_eq(circ))
+                $(nonlinear_eq(circ, nl_elems))
             end
             #copy!(J, Jq*model.fq)
             BLAS.gemm!('N', 'N', 1., Jq, fq, 0., J)
             #copy!(Jp, Jq*pexp)
             BLAS.gemm!('N', 'N', 1., Jq, pexp, 0., Jp)
-        end
+        end]
 
-        init_z = initial_solution(model.nonlinear_eq, model.q0, model.fq)
-        nonlinear_eq_func = eval(quote
+        init_z = initial_solution(model.nonlinear_eqs[1], model.q0s[1], model.fqs[1,1])
+        nonlinear_eq_funcs = [eval(quote
             if VERSION < v"0.5.0-dev+2396"
                 # wrap up in named function because anonymous functions are slow
                 # in old Julia versions
                 function $(gensym())(res, J, Jp, p, z)
-                    q0=$(model.q0)
-                    pexp=$(model.pexp)
+                    q0=$(model.q0s[idx])
+                    pexp=$(model.pexps[idx])
                     q=$(zeros(nq(model)))
                     Jq=$(zeros(nn(model), nq(model)))
-                    fq=$(model.fq)
-                    $(model.nonlinear_eq)
+                    fq=$(model.fqs[idx,idx])
+                    $(model.nonlinear_eqs[idx])
                     return nothing
                 end
             else
                 (res, J, Jp, p, z) ->
-                    let q0=$(model.q0), pexp=$(model.pexp),
+                    let q0=$(model.q0s[idx]), pexp=$(model.pexps[idx]),
                         q=$(zeros(nq(model))),
-                        Jq=$(zeros(nn(model), nq(model))), fq=$(model.fq)
-                        $(model.nonlinear_eq)
+                        Jq=$(zeros(nn(model), nq(model))), fq=$(model.fqs[idx,idx])
+                        $(model.nonlinear_eqs[idx])
                         return nothing
                     end
             end
-        end)
-        model.solver =
-            Solver(ParametricNonLinEq(nonlinear_eq_func, nn(model), np(model)),
-                   zeros(np(model)), init_z)
+        end) for idx in 1:length(model.nonlinear_eqs)]
+        model.solvers =
+            [Solver(ParametricNonLinEq(nleqf, nn(model), np(model)),
+                    zeros(np(model)), init_z) for nleqf in nonlinear_eq_funcs]
         return model
     end
 end
@@ -470,11 +478,11 @@ function initial_solution(nleq, q0, fq)
 end
 
 nx(model::DiscreteModel) = length(model.x0)
-nq(model::DiscreteModel) = length(model.q0)
+nq(model::DiscreteModel) = sum(map(length, model.q0s))
 np(model::DiscreteModel) = size(model.dq, 1)
 nu(model::DiscreteModel) = size(model.eq, 2)
 ny(model::DiscreteModel) = length(model.y0)
-nn(model::DiscreteModel) = size(model.fq, 2)
+nn(model::DiscreteModel) = sum([size(fq, 2) for fq in model.fqs])
 
 function steadystate(model::DiscreteModel, u=zeros(nu(model)))
     IA_LU = lufact(eye(nx(model))-model.a)
@@ -482,8 +490,8 @@ function steadystate(model::DiscreteModel, u=zeros(nu(model)))
         (res, J, Jp, p, z) ->
             let q0=$(zeros(nq(model))), pexp=$(eye(nq(model))),
                 q=$(zeros(nq(model))), Jq=$(zeros(nn(model), nq(model))),
-                fq=$(model.pexp*model.dq/IA_LU*model.c + model.fq)
-                $(model.nonlinear_eq)
+                fq=$(model.pexps[1]*model.dq/IA_LU*model.c + model.fqs[1,1])
+                $(model.nonlinear_eqs[1])
                 return nothing
             end
     end)
@@ -491,8 +499,8 @@ function steadystate(model::DiscreteModel, u=zeros(nu(model)))
     steady_solver = HomotopySolver{SimpleSolver}(steady_nleq, zeros(nq(model)),
                                                  zeros(nn(model)))
     set_resabs2tol!(steady_solver, 1e-30)
-    steady_q0 = model.q0 + model.pexp*(model.dq/IA_LU*model.b + model.eq)*u +
-                model.pexp*model.dq/IA_LU*model.x0
+    steady_q0 = model.q0s[1] + model.pexps[1]*(model.dq/IA_LU*model.b + model.eq)*u +
+                model.pexps[1]*model.dq/IA_LU*model.x0
     steady_z = solve(steady_solver, steady_q0)
     if !hasconverged(steady_solver)
         error("Failed to find steady state solution")
@@ -517,8 +525,8 @@ function run!(model::DiscreteModel, u::AbstractMatrix{Float64})
         # copy!(p, model.dq * model.x + model.eq * u[:,n])
         BLAS.gemv!('N', 1., model.dq, model.x, 0., p)
         BLAS.gemv!('N', 1., model.eq, ucur, 1., p)
-        z = solve(model.solver, p)
-        if ~hasconverged(model.solver)
+        z = solve(model.solvers[1], p)
+        if ~hasconverged(model.solvers[1])
             if all(isfinite(z))
                 warn("Failed to converge while solving non-linear equation.")
             else

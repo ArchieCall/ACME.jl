@@ -90,7 +90,9 @@ end
 
 function checksteady!(model)
     x_steady = steadystate!(model)
-    ACME.set_resabs2tol!(model.solver, 1e-25)
+    for s in model.solvers
+        ACME.set_resabs2tol!(s, 1e-25)
+    end
     run!(model, zeros(1, 1))
     @test_approx_eq model.x x_steady
 end
@@ -117,8 +119,8 @@ end
 
 include("../examples/birdie.jl")
 let model=birdie(vol=0.8)
-    ACME.solve(model.solver, [0.003, -0.0002])
-    @assert ACME.hasconverged(model.solver)
+    ACME.solve(model.solvers[1], [0.003, -0.0002])
+    @assert all(ACME.hasconverged, model.solvers)
     println("Running birdie with fixed vol")
     y = run!(model, sin(2π*1000/44100*(0:44099)'))
     @test size(y) == (1,44100)
