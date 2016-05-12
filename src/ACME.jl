@@ -339,8 +339,6 @@ type DiscreteModel{Solver}
             end
             #copy!(J, Jq*model.fq)
             BLAS.gemm!('N', 'N', 1., Jq, fq, 0., J)
-            #copy!(Jp, Jq*pexp)
-            BLAS.gemm!('N', 'N', 1., Jq, pexp, 0., Jp)
         end
 
         init_z = initial_solution(model.nonlinear_eq, model.q0, model.fq)
@@ -348,18 +346,18 @@ type DiscreteModel{Solver}
             if VERSION < v"0.5.0-dev+2396"
                 # wrap up in named function because anonymous functions are slow
                 # in old Julia versions
-                function $(gensym())(res, J, Jp, pfull, z)
-                    pexp=$(model.pexp)
+                function $(gensym())(res, J, scratch, z)
+                    pfull=scratch[1]
+                    Jq=scratch[2]
                     q=$(zeros(nq(model)))
-                    Jq=$(zeros(nn(model), nq(model)))
                     fq=$(model.fq)
                     $(model.nonlinear_eq)
                     return nothing
                 end
             else
-                (res, J, Jp, pfull, z) ->
-                    let pexp=$(model.pexp), q=$(zeros(nq(model))),
-                        Jq=$(zeros(nn(model), nq(model))), fq=$(model.fq)
+                (res, J, scratch, z) ->
+                    let pfull=scratch[1], Jq=scratch[2], q=$(zeros(nq(model))),
+                        fq=$(model.fq)
                         $(model.nonlinear_eq)
                         return nothing
                     end
@@ -369,15 +367,17 @@ type DiscreteModel{Solver}
             if VERSION < v"0.5.0-dev+2396"
                 # wrap up in named function because anonymous functions are slow
                 # in old Julia versions
-                function $(gensym())(pfull, p)
+                function $(gensym())(scratch, p)
+                    pfull = scratch[1]
                     #copy!(pfull, q0 + pexp * p)
                     copy!(pfull, $(model.q0))
                     BLAS.gemv!('N', 1., $(model.pexp), p, 1., pfull)
                     return nothing
                 end
             else
-                (pfull, p) ->
+                (scratch, p) ->
                     begin
+                        pfull = scratch[1]
                         #copy!(pfull, q0 + pexp * p)
                         copy!(pfull, $(model.q0))
                         BLAS.gemv!('N', 1., $(model.pexp), p, 1., pfull)
@@ -385,9 +385,31 @@ type DiscreteModel{Solver}
                     end
             end
         end)
+        nonlinear_eq_calc_Jp = eval(quote
+            if VERSION < v"0.5.0-dev+2396"
+                # wrap up in named function because anonymous functions are slow
+                # in old Julia versions
+                function $(gensym())(scratch, Jp)
+                    Jq = scratch[2]
+                    #copy!(Jp, Jq*pexp)
+                    BLAS.gemm!('N', 'N', 1., Jq, $(model.pexp), 0., Jp)
+                    return nothing
+                end
+            else
+                (scratch, Jp) ->
+                    begin
+                        Jq = scratch[2]
+                        #copy!(Jp, Jq*pexp)
+                        BLAS.gemm!('N', 'N', 1., Jq, $(model.pexp), 0., Jp)
+                        return nothing
+                    end
+            end
+        end)
         model.solver =
             Solver(ParametricNonLinEq(nonlinear_eq_func, nonlinear_eq_set_p,
-                                      zeros(nq(model)), nn(model), np(model)),
+                                      nonlinear_eq_calc_Jp,
+                                      (zeros(nq(model)), zeros(nn(model), nq(model))),
+                                      nn(model), np(model)),
                    zeros(np(model)), init_z)
         return model
     end
@@ -471,8 +493,9 @@ function initial_solution(nleq, q0, fq)
     # between 0 and the true q0 -> q0 takes the role of p
     nq, nn = size(fq)
     init_nl_eq_func = eval(quote
-        (res, J, Jp, pfull, z) ->
-            let pexp=$(eye(nq)), q=$(zeros(nq)), Jq=$(zeros(nn, nq)), fq=$(fq)
+        (res, J, scratch, z) ->
+            let pfull=scratch[1], Jp=scratch[2], q=$(zeros(nq)),
+                Jq=$(zeros(nn, nq)), fq=$(fq)
                 $(nleq)
                 return nothing
             end
@@ -496,8 +519,8 @@ nn(model::DiscreteModel) = size(model.fq, 2)
 function steadystate(model::DiscreteModel, u=zeros(nu(model)))
     IA_LU = lufact(eye(nx(model))-model.a)
     steady_nl_eq_func = eval(quote
-        (res, J, Jp, pfull, z) ->
-            let pexp=$(eye(nq(model))),
+        (res, J, scratch, z) ->
+            let pfull=scratch[1], Jp=scratch[2],
                 q=$(zeros(nq(model))), Jq=$(zeros(nn(model), nq(model))),
                 fq=$(model.pexp*model.dq/IA_LU*model.c + model.fq)
                 $(model.nonlinear_eq)
