@@ -331,9 +331,8 @@ type DiscreteModel{Solver}
         model.x = zeros(nx(model))
 
         model.nonlinear_eq = quote
-            #copy!(q, q0 + pexp * p + fq * z)
-            copy!(q, q0)
-            BLAS.gemv!('N',1.,pexp,p,1.,q)
+            #copy!(q, pfull + fq * z)
+            copy!(q, pfull)
             BLAS.gemv!('N',1.,fq,z,1.,q)
             let J=Jq
                 $(nonlinear_eq(circ))
@@ -349,8 +348,7 @@ type DiscreteModel{Solver}
             if VERSION < v"0.5.0-dev+2396"
                 # wrap up in named function because anonymous functions are slow
                 # in old Julia versions
-                function $(gensym())(res, J, Jp, p, z)
-                    q0=$(model.q0)
+                function $(gensym())(res, J, Jp, pfull, z)
                     pexp=$(model.pexp)
                     q=$(zeros(nq(model)))
                     Jq=$(zeros(nn(model), nq(model)))
@@ -359,17 +357,37 @@ type DiscreteModel{Solver}
                     return nothing
                 end
             else
-                (res, J, Jp, p, z) ->
-                    let q0=$(model.q0), pexp=$(model.pexp),
-                        q=$(zeros(nq(model))),
+                (res, J, Jp, pfull, z) ->
+                    let pexp=$(model.pexp), q=$(zeros(nq(model))),
                         Jq=$(zeros(nn(model), nq(model))), fq=$(model.fq)
                         $(model.nonlinear_eq)
                         return nothing
                     end
             end
         end)
+        nonlinear_eq_set_p = eval(quote
+            if VERSION < v"0.5.0-dev+2396"
+                # wrap up in named function because anonymous functions are slow
+                # in old Julia versions
+                function $(gensym())(pfull, p)
+                    #copy!(pfull, q0 + pexp * p)
+                    copy!(pfull, $(model.q0))
+                    BLAS.gemv!('N', 1., $(model.pexp), p, 1., pfull)
+                    return nothing
+                end
+            else
+                (pfull, p) ->
+                    begin
+                        #copy!(pfull, q0 + pexp * p)
+                        copy!(pfull, $(model.q0))
+                        BLAS.gemv!('N', 1., $(model.pexp), p, 1., pfull)
+                        return nothing
+                    end
+            end
+        end)
         model.solver =
-            Solver(ParametricNonLinEq(nonlinear_eq_func, nn(model), np(model)),
+            Solver(ParametricNonLinEq(nonlinear_eq_func, nonlinear_eq_set_p,
+                                      zeros(nq(model)), nn(model), np(model)),
                    zeros(np(model)), init_z)
         return model
     end
@@ -453,9 +471,8 @@ function initial_solution(nleq, q0, fq)
     # between 0 and the true q0 -> q0 takes the role of p
     nq, nn = size(fq)
     init_nl_eq_func = eval(quote
-        (res, J, Jp, p, z) ->
-            let q0=$(zeros(nq)), pexp=$(eye(nq)), q=$(zeros(nq)),
-                Jq=$(zeros(nn, nq)), fq=$(fq)
+        (res, J, Jp, pfull, z) ->
+            let pexp=$(eye(nq)), q=$(zeros(nq)), Jq=$(zeros(nn, nq)), fq=$(fq)
                 $(nleq)
                 return nothing
             end
@@ -479,8 +496,8 @@ nn(model::DiscreteModel) = size(model.fq, 2)
 function steadystate(model::DiscreteModel, u=zeros(nu(model)))
     IA_LU = lufact(eye(nx(model))-model.a)
     steady_nl_eq_func = eval(quote
-        (res, J, Jp, p, z) ->
-            let q0=$(zeros(nq(model))), pexp=$(eye(nq(model))),
+        (res, J, Jp, pfull, z) ->
+            let pexp=$(eye(nq(model))),
                 q=$(zeros(nq(model))), Jq=$(zeros(nn(model), nq(model))),
                 fq=$(model.pexp*model.dq/IA_LU*model.c + model.fq)
                 $(model.nonlinear_eq)
