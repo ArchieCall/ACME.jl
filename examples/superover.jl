@@ -78,6 +78,9 @@ function superover(::Type{Circuit}; drive=nothing, tone=nothing, level=nothing, 
     connect!(circ, d4[:+], c11[2], :gnd)
     connect!(circ, :vcc, r17[1])
     connect!(circ, r17[2], r18[1], c12[1], :vb)
+    #vbsrc = voltagesource(4.5)
+    #connect!(circ, vbsrc[:+], :vb)
+    #connect!(circ, vbsrc[:-], :gnd)
     connect!(circ, :gnd, r18[2], c12[2])
 
     # input stage

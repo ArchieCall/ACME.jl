@@ -520,18 +520,30 @@ function run!(model::DiscreteModel, u::AbstractMatrix{Float64})
     p = Array(Float64, np(model))
     ycur = Array(Float64, ny(model))
     xnew = Array(Float64, nx(model))
+    z = Array(Float64, nn(model))
     @showprogress 1 "Running model: " for n = 1:size(u)[2]
         copy!(ucur, u[:,n])
         # copy!(p, model.dq * model.x + model.eq * u[:,n])
         BLAS.gemv!('N', 1., model.dq, model.x, 0., p)
         BLAS.gemv!('N', 1., model.eq, ucur, 1., p)
-        z = solve(model.solvers[1], p)
-        if ~hasconverged(model.solvers[1])
-            if all(isfinite(z))
-                warn("Failed to converge while solving non-linear equation.")
-            else
-                error("Failed to converge while solving non-linear equation, got non-finite result.")
+        zoff = 1
+        #for idx in 1:length(model.solvers)
+    #        copy!(model.qus[idx], model.q0s[idx])
+#        end
+        for idx in 1:length(model.solvers)
+            zsub = solve(model.solvers[idx], p)
+            if ~hasconverged(model.solvers[idx])
+                if all(isfinite(zsub))
+                    warn("Failed to converge while solving non-linear equation.")
+                else
+                    error("Failed to converge while solving non-linear equation, got non-finite result.")
+                end
             end
+            #for idx_following in idx+1:length(model.solvers)
+        #        BLAS.gemv!('N', 1., model.fqs[idx_following, idx], zsub, 1., model.qus[idx_following])
+    #        end
+            copy!(z, zoff, zsub, 1, length(zsub))
+            zoff += length(zsub)
         end
         #y[:,n] = model.dy * model.x + model.ey * u[:,n] + model.fy * z + model.y0
         copy!(ycur, model.y0)
