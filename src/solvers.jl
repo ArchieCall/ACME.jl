@@ -29,6 +29,7 @@ type SimpleSolver{NLEQ<:ParametricNonLinEq}
     nleq::NLEQ
     z::Vector{Float64}
     JLU::Base.LU{Float64,Matrix{Float64}}
+    lu_info::Ref{Base.LinAlg.BlasInt}
     last_z::Vector{Float64}
     last_p::Vector{Float64}
     last_Jp::Matrix{Float64}
@@ -43,6 +44,7 @@ type SimpleSolver{NLEQ<:ParametricNonLinEq}
         z = zeros(nn(nleq))
         ipiv = zeros(Base.LinAlg.BlasInt, nn(nleq))
         JLU = Base.LU{Float64,Matrix{Float64}}(nleq.J, ipiv, Base.LinAlg.BlasInt(0))
+        lu_info = Ref{Base.LinAlg.BlasInt}(0)
         last_z = zeros(nn(nleq))
         last_p = zeros(np(nleq))
         last_Jp = zeros(nn(nleq), np(nleq))
@@ -50,8 +52,8 @@ type SimpleSolver{NLEQ<:ParametricNonLinEq}
                                                     Base.LinAlg.BlasInt(0))
         tmp_nn = zeros(nn(nleq))
         tmp_np = zeros(np(nleq))
-        solver = new(nleq, z, JLU, last_z, last_p, last_Jp, last_JLU, 0, 0.0, 1e-20,
-                     tmp_nn, tmp_np)
+        solver = new(nleq, z, JLU, lu_info, last_z, last_p, last_Jp, last_JLU,
+                     0, 0.0, 1e-20, tmp_nn, tmp_np)
         set_extrapolation_origin(solver, initial_p, initial_z)
         return solver
     end
@@ -64,16 +66,13 @@ set_resabs2tol!(solver::SimpleSolver, tol) = solver.tol = tol
 
 function set_extrapolation_origin(solver::SimpleSolver, p, z)
     evaluate!(solver.nleq, p, z)
-    solver.JLU = getrf!(solver.JLU)
+    getrf!(solver.JLU, solver.lu_info)
     set_extrapolation_origin(solver, p, z, solver.nleq.Jp, solver.JLU)
 end
 
 function set_extrapolation_origin(solver::SimpleSolver, p, z, Jp, JLU)
     copy!(solver.last_JLU.factors, JLU.factors)
     copy!(solver.last_JLU.ipiv, JLU.ipiv)
-    solver.last_JLU = Base.LU{Float64,Matrix{Float64}}(solver.last_JLU.factors,
-                                                       solver.last_JLU.ipiv,
-                                                       JLU.info)
     copy!(solver.last_Jp, Jp)
     copy!(solver.last_p, p)
     copy!(solver.last_z, z)
@@ -85,15 +84,15 @@ hasconverged(solver::SimpleSolver) = solver.ressumabs2 < solver.tol
 
 needediterations(solver::SimpleSolver) = solver.iters
 
-function getrf!(lu::Base.LU{Float64,Matrix{Float64}})
+# Note: lu.info is not updated!
+function getrf!(lu::Base.LU{Float64,Matrix{Float64}}, info::Ref{Base.LinAlg.BlasInt})
     m, n = size(lu.factors)
     lda  = max(1, m)
-    info = zeros(Base.LinAlg.BlasInt, 1)
     ccall((Compat.@blasfunc(dgetrf_), Base.LinAlg.LAPACK.liblapack), Void,
           (Ptr{Base.LinAlg.BlasInt}, Ptr{Base.LinAlg.BlasInt}, Ptr{Float64},
            Ptr{Base.LinAlg.BlasInt}, Ptr{Base.LinAlg.BlasInt}, Ptr{Base.LinAlg.BlasInt}),
           &m, &n, lu.factors, &lda, lu.ipiv, info)
-    return Base.LU{Float64,Matrix{Float64}}(lu.factors, lu.ipiv, info[1])
+    return nothing
 end
 
 function solve(solver::SimpleSolver, p::AbstractVector{Float64}, maxiter=500)
@@ -111,8 +110,8 @@ function solve(solver::SimpleSolver, p::AbstractVector{Float64}, maxiter=500)
         if ~isfinite(solver.ressumabs2) || ~all(isfinite, solver.nleq.J)
             return solver.z
         end
-        solver.JLU = getrf!(solver.JLU)
-        if solver.JLU.info > 0 # J was singular
+        getrf!(solver.JLU, solver.lu_info)
+        if solver.lu_info[] > 0 # J was singular
             return solver.z
         end
         hasconverged(solver) && break
