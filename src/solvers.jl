@@ -95,12 +95,33 @@ function getrf!(lu::Base.LU{Float64,Matrix{Float64}}, info::Ref{Base.LinAlg.Blas
     return nothing
 end
 
+function getrs!(trans::Char, A::Matrix{Float64}, ipiv::Vector{Base.LinAlg.BlasInt}, B::Vector{Float64}, info::Ref{Base.LinAlg.BlasInt})
+    Base.LinAlg.LAPACK.chktrans(trans)
+    Base.LinAlg.chkstride1(A, B, ipiv)
+    n = size(A, 2)
+    if n ≠ size(A, 1)
+        throw(DimensionMismatch("matrix is not square: dimensions are $(size(A))"))
+    end
+    if n ≠ size(B, 1)
+        throw(DimensionMismatch("B has leading dimension $(size(B,1)), but needs $n"))
+    end
+    ccall((Compat.@blasfunc(dgetrs_), Base.LinAlg.LAPACK.liblapack), Void,
+          (Ptr{UInt8}, Ptr{Base.LinAlg.BlasInt}, Ptr{Base.LinAlg.BlasInt}, Ptr{Float64}, Ptr{Base.LinAlg.BlasInt},
+           Ptr{Base.LinAlg.BlasInt}, Ptr{Float64}, Ptr{Base.LinAlg.BlasInt}, Ptr{Base.LinAlg.BlasInt}),
+          &trans, &n, &1, A, &max(1,stride(A,2)), ipiv, B, &max(1,stride(B,2)), info)
+    if info[] ≠ 0
+        throw(LAPACKException(info[]))
+    end
+    B
+end
+
+
 function solve(solver::SimpleSolver, p::AbstractVector{Float64}, maxiter=500)
     #solver.z = solver.last_z - solver.last_JLU\(solver.last_Jp * (p-solver.last_p))
     copy!(solver.tmp_np, p)
     BLAS.axpy!(-1.0, solver.last_p, solver.tmp_np)
     BLAS.gemv!('N', 1.,solver.last_Jp, solver.tmp_np, 0., solver.tmp_nn)
-    A_ldiv_B!(solver.last_JLU, solver.tmp_nn)
+    getrs!('N', solver.last_JLU.factors, solver.last_JLU.ipiv, solver.tmp_nn, solver.lu_info)
     copy!(solver.z, solver.last_z)
     BLAS.axpy!(-1.0, solver.tmp_nn, solver.z)
 
@@ -117,7 +138,7 @@ function solve(solver::SimpleSolver, p::AbstractVector{Float64}, maxiter=500)
         hasconverged(solver) && break
         #solver.z -= solver.JLU\solver.nleq.res
         copy!(solver.tmp_nn, solver.nleq.res)
-        A_ldiv_B!(solver.JLU, solver.tmp_nn)
+        getrs!('N', solver.JLU.factors, solver.JLU.ipiv, solver.tmp_nn, solver.lu_info)
         BLAS.axpy!(-1.0, solver.tmp_nn, solver.z)
     end
     if hasconverged(solver)
